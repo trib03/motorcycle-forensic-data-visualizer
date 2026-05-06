@@ -1,7 +1,7 @@
 import csv
 import os
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
 import numpy as np
@@ -9,7 +9,7 @@ import pyqtgraph as pg
 from pyqtgraph.exporters import ImageExporter
 
 from PySide6.QtCore import QAbstractTableModel, QModelIndex, Qt
-from PySide6.QtGui import QAction, QIcon
+from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -20,8 +20,11 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QScrollArea,
+    QSlider,
+    QSpinBox,
     QSplitter,
     QTableView,
+    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -33,7 +36,6 @@ from PySide6.QtWidgets import (
 
 
 def resource_path(relative_path: str) -> str:
-    """Return absolute path to resource for dev and bundled app."""
     if hasattr(sys, "_MEIPASS"):
         base_path = sys._MEIPASS
     elif getattr(sys, "frozen", False):
@@ -43,10 +45,8 @@ def resource_path(relative_path: str) -> str:
     return os.path.join(base_path, relative_path)
 
 
-
 def normalize_name(s: str) -> str:
     return "".join(ch.lower() for ch in s.strip() if ch.isalnum() or ch in ["_", " "])
-
 
 
 def parse_float(value: str) -> float:
@@ -54,6 +54,23 @@ def parse_float(value: str) -> float:
         return float(value.strip().replace(",", "."))
     except Exception:
         return np.nan
+
+
+def moving_average(y: np.ndarray, window: int) -> np.ndarray:
+    """Centered moving average that ignores NaN values within each window."""
+    if window <= 1:
+        return y.copy()
+    half = window // 2
+    n = len(y)
+    out = np.full(n, np.nan, dtype=float)
+    for i in range(n):
+        lo = max(0, i - half)
+        hi = min(n, i + half + 1)
+        seg = y[lo:hi]
+        valid = seg[np.isfinite(seg)]
+        if valid.size:
+            out[i] = valid.mean()
+    return out
 
 
 # =========================================================
@@ -180,45 +197,36 @@ class LoadedCSV:
     rows: List[List[str]]
     x: np.ndarray
     series: Dict[str, np.ndarray]
-
+    sample_rate: Optional[float] = field(default=None)
 
 
 def find_column(headers: List[str], candidates: List[str]) -> Optional[int]:
     normalized_headers = [normalize_name(h) for h in headers]
     normalized_candidates = [normalize_name(c) for c in candidates]
-
     for candidate in normalized_candidates:
         for i, header in enumerate(normalized_headers):
             if header == candidate:
                 return i
-
     for candidate in normalized_candidates:
         for i, header in enumerate(normalized_headers):
             if candidate in header:
                 return i
-
     return None
-
 
 
 def parse_float_column(rows: List[List[str]], col: int) -> np.ndarray:
     data = []
     for row in rows:
-        if col < len(row):
-            data.append(parse_float(row[col]))
-        else:
-            data.append(np.nan)
+        data.append(parse_float(row[col]) if col < len(row) else np.nan)
     return np.array(data, dtype=float)
-
 
 
 def load_csv(path: str) -> LoadedCSV:
     with open(path, "r", newline="", encoding="utf-8-sig") as f:
-        reader = csv.reader(f)
-        all_rows = list(reader)
+        all_rows = list(csv.reader(f))
 
     if len(all_rows) < 2:
-        raise ValueError("CSV appears empty or missing data rows.")
+        raise ValueError("CSV appears empty or has no data rows.")
 
     headers = all_rows[0]
     rows = all_rows[1:]
@@ -239,7 +247,14 @@ def load_csv(path: str) -> LoadedCSV:
         if col is not None:
             series[key] = parse_float_column(rows, col)
 
-    return LoadedCSV(headers=headers, rows=rows, x=x, series=series)
+    x_finite = x[np.isfinite(x)]
+    sample_rate: Optional[float] = None
+    if len(x_finite) > 1:
+        dt = float(np.median(np.diff(x_finite)))
+        if dt > 0:
+            sample_rate = 1.0 / dt
+
+    return LoadedCSV(headers=headers, rows=rows, x=x, series=series, sample_rate=sample_rate)
 
 
 # =========================================================
@@ -247,10 +262,10 @@ def load_csv(path: str) -> LoadedCSV:
 # =========================================================
 
 class CSVTableModel(QAbstractTableModel):
-    def __init__(self, headers: Optional[List[str]] = None, rows: Optional[List[List[str]]] = None):
+    def __init__(self):
         super().__init__()
-        self._headers = headers or []
-        self._rows = rows or []
+        self._headers: List[str] = []
+        self._rows: List[List[str]] = []
 
     def set_csv_data(self, headers: List[str], rows: List[List[str]]):
         self.beginResetModel()
@@ -271,8 +286,7 @@ class CSVTableModel(QAbstractTableModel):
         if not index.isValid():
             return None
         if role == Qt.DisplayRole:
-            r = index.row()
-            c = index.column()
+            r, c = index.row(), index.column()
             if r < len(self._rows) and c < len(self._rows[r]):
                 return self._rows[r][c]
             return ""
@@ -291,12 +305,10 @@ class CSVTableModel(QAbstractTableModel):
 
 
 class SignalStatsTableModel(QAbstractTableModel):
-    def __init__(self, loaded: Optional[LoadedCSV] = None):
+    def __init__(self):
         super().__init__()
-        self._headers = ["Signal", "Min", "Avg", "Max"]
+        self._col_headers = ["Signal", "Min", "Avg", "Max"]
         self._rows: List[List[str]] = []
-        if loaded is not None:
-            self.set_loaded_csv(loaded)
 
     def set_loaded_csv(self, loaded: LoadedCSV):
         self.beginResetModel()
@@ -307,15 +319,14 @@ class SignalStatsTableModel(QAbstractTableModel):
             y = loaded.series[key]
             finite = y[np.isfinite(y)]
             if finite.size == 0:
-                row = [SIGNALS[key]["label"], "-", "-", "-"]
+                self._rows.append([SIGNALS[key]["label"], "-", "-", "-"])
             else:
-                row = [
+                self._rows.append([
                     SIGNALS[key]["label"],
                     f"{float(np.min(finite)):.3f}",
                     f"{float(np.mean(finite)):.3f}",
                     f"{float(np.max(finite)):.3f}",
-                ]
-            self._rows.append(row)
+                ])
         self.endResetModel()
 
     def clear(self):
@@ -327,7 +338,7 @@ class SignalStatsTableModel(QAbstractTableModel):
         return len(self._rows)
 
     def columnCount(self, parent=QModelIndex()) -> int:
-        return len(self._headers)
+        return len(self._col_headers)
 
     def data(self, index: QModelIndex, role=Qt.DisplayRole):
         if not index.isValid():
@@ -343,34 +354,32 @@ class SignalStatsTableModel(QAbstractTableModel):
     def headerData(self, section: int, orientation: Qt.Orientation, role=Qt.DisplayRole):
         if role != Qt.DisplayRole:
             return None
-        if orientation == Qt.Horizontal and section < len(self._headers):
-            return self._headers[section]
+        if orientation == Qt.Horizontal and section < len(self._col_headers):
+            return self._col_headers[section]
         if orientation == Qt.Vertical:
             return str(section)
         return None
 
 
 # =========================================================
-# Main window
+# Plot panel (reusable multi-axis plot widget)
 # =========================================================
 
-class MainWindow(QMainWindow):
+class PlotPanel(QWidget):
+    """Self-contained plot widget with up to three independent Y-axes."""
+
     def __init__(self):
         super().__init__()
-        app_icon = QIcon(resource_path("assets/icon.ico"))
-        self.setWindowTitle("Motorcycle Forensic Data Visualizer")
-        self.setWindowIcon(app_icon)
 
-        self.loaded: Optional[LoadedCSV] = None
+        self._loaded: Optional[LoadedCSV] = None
         self.curves: Dict[str, Dict] = {}
         self.unit_order: List[str] = []
-        self.right_axis_grids: Dict[str, List[pg.InfiniteLine]] = {"right1": [], "right2": []}
+        self._right_grids: Dict[str, List[pg.InfiniteLine]] = {"right1": [], "right2": []}
 
         pg.setConfigOptions(antialias=True)
 
-        # Main plot
-        self.plot = pg.PlotWidget()
-        self.plot_item = self.plot.getPlotItem()
+        self.plot_widget = pg.PlotWidget()
+        self.plot_item = self.plot_widget.getPlotItem()
         self.plot_item.showGrid(x=True, y=True, alpha=0.2)
         self.plot_item.setLabel("bottom", "Time (s) / Index")
         self.plot_item.addLegend(offset=(10, 10))
@@ -378,7 +387,6 @@ class MainWindow(QMainWindow):
         self.main_vb = self.plot_item.vb
         self.left_axis = self.plot_item.getAxis("left")
 
-        # Additional right-side axes
         self.right_axis_1 = pg.AxisItem("right")
         self.right_axis_2 = pg.AxisItem("right")
         self.plot_item.layout.addItem(self.right_axis_1, 2, 3)
@@ -394,54 +402,292 @@ class MainWindow(QMainWindow):
         self.right_vb_1.setXLink(self.main_vb)
         self.right_vb_2.setXLink(self.main_vb)
 
-        self.main_vb.sigResized.connect(self.update_views)
-        self.main_vb.sigYRangeChanged.connect(self.on_main_y_range_changed)
-        self.right_vb_1.sigYRangeChanged.connect(lambda *_: self.update_axis_grid_lines("right1"))
-        self.right_vb_2.sigYRangeChanged.connect(lambda *_: self.update_axis_grid_lines("right2"))
-
         self.axis_slots = {
-            "left": {"axis": self.left_axis, "viewbox": self.main_vb},
-            "right1": {"axis": self.right_axis_1, "viewbox": self.right_vb_1},
-            "right2": {"axis": self.right_axis_2, "viewbox": self.right_vb_2},
+            "left":   {"axis": self.left_axis,    "viewbox": self.main_vb},
+            "right1": {"axis": self.right_axis_1,  "viewbox": self.right_vb_1},
+            "right2": {"axis": self.right_axis_2,  "viewbox": self.right_vb_2},
         }
 
-        self.set_all_axes_hidden()
-        self.update_views()
+        self.main_vb.sigResized.connect(self._sync_views)
+        self.main_vb.sigYRangeChanged.connect(lambda *_: self._update_all_grids())
+        self.right_vb_1.sigYRangeChanged.connect(lambda *_: self._update_grid("right1"))
+        self.right_vb_2.sigYRangeChanged.connect(lambda *_: self._update_grid("right2"))
 
-        # Controls
-        self.load_btn = QPushButton("Load CSV")
-        self.load_btn.clicked.connect(self.on_load_csv)
+        self._hide_all_axes()
+        self._sync_views()
 
-        self.export_btn = QPushButton("Export Plot as PNG")
-        self.export_btn.clicked.connect(self.on_export_png)
+        self.export_btn = QPushButton("Export as PNG")
+        self.export_btn.clicked.connect(self._on_export)
         self.export_btn.setEnabled(False)
 
-        self.status_lbl = QLabel("No file loaded.")
+        self.reset_btn = QPushButton("Reset View")
+        self.reset_btn.clicked.connect(self._on_reset_view)
+        self.reset_btn.setEnabled(False)
 
-        self.checkbox_container = QWidget()
-        self.checkbox_layout = QVBoxLayout(self.checkbox_container)
-        self.checkbox_layout.setAlignment(Qt.AlignTop)
+        btn_row = QHBoxLayout()
+        btn_row.addWidget(self.reset_btn)
+        btn_row.addStretch()
+        btn_row.addWidget(self.export_btn)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(self.plot_widget, stretch=1)
+        layout.addLayout(btn_row)
+
+    # --- view / axis management ---
+
+    def _sync_views(self):
+        rect = self.main_vb.sceneBoundingRect()
+        self.right_vb_1.setGeometry(rect)
+        self.right_vb_2.setGeometry(rect)
+        self.right_vb_1.linkedViewChanged(self.main_vb, self.right_vb_1.XAxis)
+        self.right_vb_2.linkedViewChanged(self.main_vb, self.right_vb_2.XAxis)
+        self._update_all_grids()
+
+    def _update_all_grids(self):
+        self._update_grid("right1")
+        self._update_grid("right2")
+
+    def _clear_grid(self, slot_name: str):
+        for line in self._right_grids[slot_name]:
+            try:
+                self.plot_item.removeItem(line)
+            except Exception:
+                pass
+        self._right_grids[slot_name].clear()
+
+    def _update_grid(self, slot_name: str):
+        self._clear_grid(slot_name)
+        active_slots = {self._slot_for_unit(u) for u in self.unit_order}
+        if slot_name not in active_slots:
+            return
+        axis = self.axis_slots[slot_name]["axis"]
+        vb = self.axis_slots[slot_name]["viewbox"]
+        ticks = axis.tickValues(*vb.viewRange()[1], 400)
+        if not ticks:
+            return
+        y_min, y_max = self.main_vb.viewRange()[1]
+        for tick_val in ticks[0][1]:
+            scene_pt = vb.mapViewToScene(pg.Point(0, tick_val))
+            mapped_y = self.main_vb.mapSceneToView(scene_pt).y()
+            if np.isfinite(mapped_y) and y_min <= mapped_y <= y_max:
+                line = pg.InfiniteLine(
+                    pos=mapped_y, angle=0, movable=False,
+                    pen=pg.mkPen((160, 160, 160, 90), width=1),
+                )
+                self.plot_item.addItem(line)
+                self._right_grids[slot_name].append(line)
+
+    def _hide_all_axes(self):
+        for slot in self.axis_slots.values():
+            axis = slot["axis"]
+            axis.setStyle(showValues=False)
+            axis.setLabel("")
+            if axis is self.left_axis:
+                axis.show()
+            else:
+                axis.hide()
+        self._clear_grid("right1")
+        self._clear_grid("right2")
+
+    def _show_active_axes(self):
+        self._hide_all_axes()
+        for unit in self.unit_order:
+            slot_name = self._slot_for_unit(unit)
+            if slot_name is None:
+                continue
+            axis = self.axis_slots[slot_name]["axis"]
+            axis.setStyle(showValues=True)
+            axis.setLabel(UNIT_AXIS_LABELS.get(unit, unit))
+            axis.show()
+        self._update_all_grids()
+
+    def _slot_for_unit(self, unit: str) -> Optional[str]:
+        slots = ["left", "right1", "right2"]
+        if unit not in self.unit_order:
+            return None
+        idx = self.unit_order.index(unit)
+        return slots[idx] if idx < len(slots) else None
+
+    def _vb_for_unit(self, unit: str) -> pg.ViewBox:
+        slot = self._slot_for_unit(unit)
+        return self.axis_slots[slot]["viewbox"] if slot else self.main_vb
+
+    # --- curve management ---
+
+    def _clear_curves(self):
+        for item in self.curves.values():
+            try:
+                item["viewbox"].removeItem(item["curve"])
+            except Exception:
+                pass
+        self.curves.clear()
+
+    def _rebuild_legend(self):
+        legend = self.plot_item.legend
+        if legend:
+            legend.clear()
+            for key, item in self.curves.items():
+                legend.addItem(item["curve"], SIGNALS[key]["label"])
+
+    def _auto_range(self):
+        if self._loaded is None:
+            return
+        x_finite = self._loaded.x[np.isfinite(self._loaded.x)]
+        if x_finite.size:
+            self.main_vb.setXRange(float(x_finite.min()), float(x_finite.max()), padding=0.02)
+
+        for unit in self.unit_order:
+            vb = self._vb_for_unit(unit)
+            all_y = []
+            for item in self.curves.values():
+                if item["unit"] == unit:
+                    y_data = item["curve"].getData()[1]
+                    if y_data is not None:
+                        finite = y_data[np.isfinite(y_data)]
+                        if finite.size:
+                            all_y.append(finite)
+            if not all_y:
+                continue
+            combined = np.concatenate(all_y)
+            y_min, y_max = float(combined.min()), float(combined.max())
+            if y_min == y_max:
+                pad = 1.0 if y_min == 0 else abs(y_min) * 0.1
+            else:
+                pad = (y_max - y_min) * 0.05
+            vb.setYRange(y_min - pad, y_max + pad, padding=0)
+
+        self._sync_views()
+
+    # --- public API ---
+
+    def refresh(self, loaded: Optional[LoadedCSV], active_keys: List[str], window: int = 1):
+        """Re-draw all active signals. Pass window > 1 to apply a moving average."""
+        self._loaded = loaded
+        self._clear_curves()
+        self.unit_order = []
+        self._hide_all_axes()
+        self._rebuild_legend()
+
+        if loaded is None or not active_keys:
+            self.export_btn.setEnabled(False)
+            self.reset_btn.setEnabled(False)
+            return
+
+        for key in active_keys:
+            unit = SIGNALS[key]["unit"]
+            if unit not in self.unit_order:
+                self.unit_order.append(unit)
+        self.unit_order = self.unit_order[:3]
+
+        self._show_active_axes()
+
+        for key in active_keys:
+            unit = SIGNALS[key]["unit"]
+            if unit not in self.unit_order:
+                continue
+            y = loaded.series[key]
+            if window > 1:
+                y = moving_average(y, window)
+            vb = self._vb_for_unit(unit)
+            pen = pg.mkPen(color=SIGNALS[key]["color"], width=2)
+            curve = pg.PlotDataItem(loaded.x, y, pen=pen, name=SIGNALS[key]["label"])
+            vb.addItem(curve)
+            self.curves[key] = {"curve": curve, "viewbox": vb, "unit": unit}
+
+        self._rebuild_legend()
+        self._auto_range()
+        self.export_btn.setEnabled(True)
+        self.reset_btn.setEnabled(True)
+
+    def clear(self):
+        self._loaded = None
+        self._clear_curves()
+        self.unit_order = []
+        self._hide_all_axes()
+        self._rebuild_legend()
+        self.export_btn.setEnabled(False)
+        self.reset_btn.setEnabled(False)
+
+    def _on_reset_view(self):
+        self._auto_range()
+
+    def _on_export(self):
+        out_path, _ = QFileDialog.getSaveFileName(
+            self, "Save Plot as PNG", "plot.png", "PNG Image (*.png)"
+        )
+        if not out_path:
+            return
+        try:
+            exporter = ImageExporter(self.plot_widget.plotItem)
+            exporter.parameters()["width"] = 2000
+            exporter.export(out_path)
+        except Exception as e:
+            QMessageBox.critical(self, "Export error", f"Failed to export PNG:\n{e}")
+            return
+        QMessageBox.information(self, "Exported", f"Saved:\n{out_path}")
+
+
+# =========================================================
+# Main window
+# =========================================================
+
+class MainWindow(QMainWindow):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("Motorcycle Forensic Data Visualizer")
+        self.setWindowIcon(QIcon(resource_path("assets/icon.ico")))
+
+        self.loaded: Optional[LoadedCSV] = None
+        self._last_dir: str = ""
         self.checkboxes: Dict[str, QCheckBox] = {}
 
-        for key, config in SIGNALS.items():
-            cb = QCheckBox(config["label"])
+        # ---- Left panel ----
+        self.load_btn = QPushButton("Load CSV File…")
+        self.load_btn.clicked.connect(self.on_load_csv)
+
+        self.status_lbl = QLabel("No file loaded.")
+        self.status_lbl.setWordWrap(True)
+
+        checkbox_widget = QWidget()
+        cb_layout = QVBoxLayout(checkbox_widget)
+        cb_layout.setAlignment(Qt.AlignTop)
+        cb_layout.setSpacing(4)
+        for key, cfg in SIGNALS.items():
+            cb = QCheckBox(cfg["label"])
             cb.setEnabled(False)
             cb.stateChanged.connect(self.on_signal_toggled)
             self.checkboxes[key] = cb
-            self.checkbox_layout.addWidget(cb)
+            cb_layout.addWidget(cb)
 
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
-        scroll.setWidget(self.checkbox_container)
+        scroll.setWidget(checkbox_widget)
+
+        select_all_btn = QPushButton("All")
+        select_all_btn.setFixedWidth(50)
+        select_all_btn.clicked.connect(self.select_all_signals)
+        deselect_btn = QPushButton("None")
+        deselect_btn.setFixedWidth(50)
+        deselect_btn.clicked.connect(self.deselect_all_signals)
+
+        sel_row = QHBoxLayout()
+        sel_row.addWidget(QLabel("Select:"))
+        sel_row.addWidget(select_all_btn)
+        sel_row.addWidget(deselect_btn)
+        sel_row.addStretch()
 
         left_panel = QWidget()
         left_layout = QVBoxLayout(left_panel)
         left_layout.addWidget(self.load_btn)
-        left_layout.addWidget(self.export_btn)
+        left_layout.addWidget(self.status_lbl)
         left_layout.addSpacing(8)
         left_layout.addWidget(QLabel("Signals:"))
+        left_layout.addLayout(sel_row)
         left_layout.addWidget(scroll, stretch=1)
-        left_layout.addWidget(self.status_lbl)
+
+        # ---- Raw tab ----
+        self.raw_panel = PlotPanel()
 
         self.raw_table = QTableView()
         self.raw_table.setSortingEnabled(False)
@@ -453,232 +699,105 @@ class MainWindow(QMainWindow):
         self.stats_table_model = SignalStatsTableModel()
         self.stats_table.setModel(self.stats_table_model)
 
-        raw_table_container = QWidget()
-        raw_table_layout = QVBoxLayout(raw_table_container)
-        raw_table_layout.setContentsMargins(0, 0, 0, 0)
-        raw_table_layout.addWidget(QLabel("Raw CSV Data"))
-        raw_table_layout.addWidget(self.raw_table)
+        raw_tbl_wrap = QWidget()
+        rtl = QVBoxLayout(raw_tbl_wrap)
+        rtl.setContentsMargins(0, 0, 0, 0)
+        rtl.addWidget(QLabel("Raw CSV Data"))
+        rtl.addWidget(self.raw_table)
 
-        stats_table_container = QWidget()
-        stats_table_layout = QVBoxLayout(stats_table_container)
-        stats_table_layout.setContentsMargins(0, 0, 0, 0)
-        stats_table_layout.addWidget(QLabel("Signal Statistics"))
-        stats_table_layout.addWidget(self.stats_table)
+        stats_tbl_wrap = QWidget()
+        stl = QVBoxLayout(stats_tbl_wrap)
+        stl.setContentsMargins(0, 0, 0, 0)
+        stl.addWidget(QLabel("Signal Statistics"))
+        stl.addWidget(self.stats_table)
 
         tables_splitter = QSplitter(Qt.Horizontal)
-        tables_splitter.addWidget(raw_table_container)
-        tables_splitter.addWidget(stats_table_container)
+        tables_splitter.addWidget(raw_tbl_wrap)
+        tables_splitter.addWidget(stats_tbl_wrap)
         tables_splitter.setStretchFactor(0, 3)
         tables_splitter.setStretchFactor(1, 2)
         tables_splitter.setSizes([700, 400])
 
-        right_panel = QWidget()
-        right_layout = QVBoxLayout(right_panel)
-        right_layout.addWidget(self.plot, stretch=3)
-        right_layout.addWidget(tables_splitter, stretch=2)
+        raw_tab = QWidget()
+        raw_tab_layout = QVBoxLayout(raw_tab)
+        raw_tab_layout.setContentsMargins(4, 4, 4, 4)
+        raw_tab_layout.addWidget(self.raw_panel, stretch=3)
+        raw_tab_layout.addWidget(tables_splitter, stretch=2)
 
+        # ---- Filter tab ----
+        self.filter_panel = PlotPanel()
+
+        self.window_slider = QSlider(Qt.Horizontal)
+        self.window_slider.setMinimum(1)
+        self.window_slider.setMaximum(500)
+        self.window_slider.setValue(1)
+        self.window_slider.setTickInterval(50)
+        self.window_slider.setTickPosition(QSlider.TicksBelow)
+
+        self.window_spin = QSpinBox()
+        self.window_spin.setMinimum(1)
+        self.window_spin.setMaximum(500)
+        self.window_spin.setValue(1)
+        self.window_spin.setFixedWidth(70)
+
+        self.window_time_lbl = QLabel("")
+        self.window_time_lbl.setMinimumWidth(70)
+
+        self.window_slider.valueChanged.connect(self.window_spin.setValue)
+        self.window_spin.valueChanged.connect(self.window_slider.setValue)
+        self.window_slider.valueChanged.connect(self._on_filter_changed)
+
+        filter_ctrl = QHBoxLayout()
+        filter_ctrl.addWidget(QLabel("Moving average window:"))
+        filter_ctrl.addWidget(self.window_slider, stretch=1)
+        filter_ctrl.addWidget(self.window_spin)
+        filter_ctrl.addWidget(QLabel("samples"))
+        filter_ctrl.addWidget(self.window_time_lbl)
+
+        filter_tab = QWidget()
+        filter_tab_layout = QVBoxLayout(filter_tab)
+        filter_tab_layout.setContentsMargins(4, 4, 4, 4)
+        filter_tab_layout.addLayout(filter_ctrl)
+        filter_tab_layout.addWidget(self.filter_panel, stretch=1)
+
+        # ---- Tab widget ----
+        self.tabs = QTabWidget()
+        self.tabs.addTab(raw_tab, "Raw Signals")
+        self.tabs.addTab(filter_tab, "Filtered Signals")
+
+        # ---- Main splitter ----
         splitter = QSplitter()
         splitter.addWidget(left_panel)
-        splitter.addWidget(right_panel)
+        splitter.addWidget(self.tabs)
         splitter.setStretchFactor(1, 1)
-        splitter.setSizes([300, 900])
+        splitter.setSizes([290, 990])
 
         self.setCentralWidget(splitter)
 
-        reset_view = QAction("Reset View", self)
-        reset_view.triggered.connect(self.reset_view)
-        self.menuBar().addAction(reset_view)
+    # ---- Helpers ----
 
-    # -----------------------------------------------------
-    # Plot view / axes
-    # -----------------------------------------------------
+    def _active_keys(self) -> List[str]:
+        return [k for k, cb in self.checkboxes.items() if cb.isEnabled() and cb.isChecked()]
 
-    def update_views(self):
-        rect = self.main_vb.sceneBoundingRect()
-        self.right_vb_1.setGeometry(rect)
-        self.right_vb_2.setGeometry(rect)
-        self.right_vb_1.linkedViewChanged(self.main_vb, self.right_vb_1.XAxis)
-        self.right_vb_2.linkedViewChanged(self.main_vb, self.right_vb_2.XAxis)
-        self.update_axis_grid_lines("right1")
-        self.update_axis_grid_lines("right2")
+    def _refresh_both_panels(self):
+        keys = self._active_keys()
+        self.raw_panel.refresh(self.loaded, keys)
+        self.filter_panel.refresh(self.loaded, keys, self.window_spin.value())
 
-    def clear_axis_grid_lines(self, slot_name: str):
-        for line in self.right_axis_grids[slot_name]:
-            try:
-                self.plot_item.removeItem(line)
-            except Exception:
-                pass
-        self.right_axis_grids[slot_name].clear()
+    def _update_time_label(self):
+        window = self.window_spin.value()
+        if self.loaded and self.loaded.sample_rate:
+            t = window / self.loaded.sample_rate
+            self.window_time_lbl.setText(f"≈ {t:.2f} s")
+        else:
+            self.window_time_lbl.setText("")
 
-    def update_axis_grid_lines(self, slot_name: str):
-        self.clear_axis_grid_lines(slot_name)
-
-        if slot_name not in ("right1", "right2"):
-            return
-
-        active_slots = {self.get_slot_for_unit(unit) for unit in self.unit_order}
-        if slot_name not in active_slots:
-            return
-
-        axis = self.axis_slots[slot_name]["axis"]
-        vb = self.axis_slots[slot_name]["viewbox"]
-        ticks = axis.tickValues(*vb.viewRange()[1], 400)
-        if not ticks:
-            return
-
-        y_min, y_max = self.main_vb.viewRange()[1]
-        mapped_ticks = []
-        for tick_value in ticks[0][1]:
-            scene_point = vb.mapViewToScene(pg.Point(0, tick_value))
-            main_point = self.main_vb.mapSceneToView(scene_point)
-            mapped_y = main_point.y()
-            if np.isfinite(mapped_y) and y_min <= mapped_y <= y_max:
-                mapped_ticks.append(mapped_y)
-
-        for mapped_y in mapped_ticks:
-            line = pg.InfiniteLine(
-                pos=mapped_y,
-                angle=0,
-                movable=False,
-                pen=pg.mkPen((160, 160, 160, 90), width=1),
-            )
-            self.plot_item.addItem(line)
-            self.right_axis_grids[slot_name].append(line)
-
-    def on_main_y_range_changed(self, *_args):
-        self.update_axis_grid_lines("right1")
-        self.update_axis_grid_lines("right2")
-
-    def set_all_axes_hidden(self):
-        for slot in self.axis_slots.values():
-            axis = slot["axis"]
-            axis.setStyle(showValues=False)
-            axis.setLabel("")
-            if axis is self.left_axis:
-                axis.show()
-            else:
-                axis.hide()
-        self.clear_axis_grid_lines("right1")
-        self.clear_axis_grid_lines("right2")
-
-    def get_active_units(self) -> List[str]:
-        units = []
-        for item in self.curves.values():
-            unit = item["unit"]
-            if unit not in units:
-                units.append(unit)
-        return units
-
-    def refresh_unit_order(self):
-        active_units = self.get_active_units()
-        self.unit_order = [u for u in self.unit_order if u in active_units]
-        for unit in active_units:
-            if unit not in self.unit_order:
-                self.unit_order.append(unit)
-        self.unit_order = self.unit_order[:3]
-
-    def get_slot_for_unit(self, unit: str) -> Optional[str]:
-        mapping = ["left", "right1", "right2"]
-        if unit in self.unit_order:
-            idx = self.unit_order.index(unit)
-            if idx < len(mapping):
-                return mapping[idx]
-        return None
-
-    def get_viewbox_for_unit(self, unit: str) -> pg.ViewBox:
-        slot = self.get_slot_for_unit(unit)
-        if slot is None:
-            return self.main_vb
-        return self.axis_slots[slot]["viewbox"]
-
-    def configure_axes(self):
-        self.set_all_axes_hidden()
-        for unit in self.unit_order:
-            slot_name = self.get_slot_for_unit(unit)
-            if slot_name is None:
-                continue
-            axis = self.axis_slots[slot_name]["axis"]
-            axis.setStyle(showValues=True)
-            axis.setLabel(UNIT_AXIS_LABELS.get(unit, unit))
-            axis.show()
-        self.update_axis_grid_lines("right1")
-        self.update_axis_grid_lines("right2")
-
-    # -----------------------------------------------------
-    # Curve management
-    # -----------------------------------------------------
-
-    def clear_all_curves(self):
-        for item in self.curves.values():
-            try:
-                item["viewbox"].removeItem(item["curve"])
-            except Exception:
-                pass
-        self.curves.clear()
-
-    def rebuild_legend(self):
-        legend = self.plot_item.legend
-        if legend is not None:
-            legend.clear()
-            for key, item in self.curves.items():
-                legend.addItem(item["curve"], SIGNALS[key]["label"])
-
-    def remap_curves(self):
-        for key, item in list(self.curves.items()):
-            new_vb = self.get_viewbox_for_unit(item["unit"])
-            if new_vb is not item["viewbox"]:
-                try:
-                    item["viewbox"].removeItem(item["curve"])
-                except Exception:
-                    pass
-                new_vb.addItem(item["curve"])
-                item["viewbox"] = new_vb
-
-    def auto_range_visible_units(self):
-        if not self.loaded or not self.curves:
-            self.set_all_axes_hidden()
-            return
-
-        self.refresh_unit_order()
-        self.configure_axes()
-        self.remap_curves()
-
-        finite_x = self.loaded.x[np.isfinite(self.loaded.x)]
-        if finite_x.size > 0:
-            self.main_vb.setXRange(float(np.min(finite_x)), float(np.max(finite_x)), padding=0.02)
-
-        for unit in self.unit_order:
-            vb = self.get_viewbox_for_unit(unit)
-            ys = []
-            for key in self.curves:
-                if SIGNALS[key]["unit"] == unit:
-                    y = self.loaded.series[key]
-                    finite = y[np.isfinite(y)]
-                    if finite.size:
-                        ys.append(finite)
-
-            if not ys:
-                continue
-
-            all_y = np.concatenate(ys)
-            y_min, y_max = float(np.min(all_y)), float(np.max(all_y))
-            if y_min == y_max:
-                pad = 1.0 if y_min == 0 else abs(y_min) * 0.1
-            else:
-                pad = (y_max - y_min) * 0.05
-            vb.setYRange(y_min - pad, y_max + pad, padding=0)
-
-        self.update_views()
-
-    # -----------------------------------------------------
-    # Actions
-    # -----------------------------------------------------
-
-    def reset_view(self):
-        self.auto_range_visible_units()
+    # ---- Slots ----
 
     def on_load_csv(self):
-        path, _ = QFileDialog.getOpenFileName(self, "Open CSV", "", "CSV Files (*.csv);;All Files (*)")
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Open CSV Log File", self._last_dir, "CSV Files (*.csv);;All Files (*)"
+        )
         if not path:
             return
 
@@ -688,16 +807,17 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Load error", f"Failed to load CSV:\n{e}")
             return
 
-        self.status_lbl.setText(f"Loaded: {os.path.basename(path)}")
+        self._last_dir = os.path.dirname(path)
+
+        sr_text = f"  |  ~{self.loaded.sample_rate:.0f} Hz" if self.loaded.sample_rate else ""
+        self.status_lbl.setText(
+            f"{os.path.basename(path)}\n{len(self.loaded.rows)} rows{sr_text}"
+        )
+
         self.raw_table_model.set_csv_data(self.loaded.headers, self.loaded.rows)
         self.raw_table.resizeColumnsToContents()
         self.stats_table_model.set_loaded_csv(self.loaded)
         self.stats_table.resizeColumnsToContents()
-
-        self.clear_all_curves()
-        self.unit_order = []
-        self.rebuild_legend()
-        self.set_all_axes_hidden()
 
         any_signal = False
         for key, cb in self.checkboxes.items():
@@ -708,91 +828,75 @@ class MainWindow(QMainWindow):
             cb.blockSignals(False)
             any_signal = any_signal or present
 
-        self.export_btn.setEnabled(any_signal)
+        self.raw_panel.clear()
+        self.filter_panel.clear()
+        self._update_time_label()
 
         if not any_signal:
             QMessageBox.warning(
-                self,
-                "No signals found",
-                "No expected signal columns were detected in the CSV.",
+                self, "No signals found",
+                "No expected signal columns were found in this CSV.\n"
+                "Please verify the file is from the HAN datalogger.",
             )
 
     def on_signal_toggled(self):
         if not self.loaded:
             return
 
-        x = self.loaded.x
+        active = self._active_keys()
+        units: List[str] = []
+        for key in active:
+            u = SIGNALS[key]["unit"]
+            if u not in units:
+                units.append(u)
 
-        for key, cb in self.checkboxes.items():
-            if key in self.curves and not cb.isChecked():
-                item = self.curves.pop(key)
-                try:
-                    item["viewbox"].removeItem(item["curve"])
-                except Exception:
-                    pass
+        if len(units) > 3:
+            sender = self.sender()
+            if isinstance(sender, QCheckBox):
+                sender.blockSignals(True)
+                sender.setChecked(False)
+                sender.blockSignals(False)
+            QMessageBox.warning(
+                self, "Too many unit groups",
+                "Only three different unit groups (m/s², deg, km/h) can be shown at once.",
+            )
+            return
 
-        self.refresh_unit_order()
-        self.configure_axes()
-        self.remap_curves()
+        self._refresh_both_panels()
 
-        for key, cb in self.checkboxes.items():
-            if not cb.isEnabled() or not cb.isChecked() or key in self.curves:
-                continue
-
-            unit = SIGNALS[key]["unit"]
-            if unit not in self.unit_order:
-                if len(self.unit_order) >= 3:
-                    QMessageBox.warning(self, "Too many unit groups", "Only three unit groups can be displayed at once.")
-                    cb.blockSignals(True)
-                    cb.setChecked(False)
-                    cb.blockSignals(False)
-                    continue
-                self.unit_order.append(unit)
-                self.configure_axes()
-
-            vb = self.get_viewbox_for_unit(unit)
-            pen = pg.mkPen(color=SIGNALS[key]["color"], width=2)
-            curve = pg.PlotDataItem(x, self.loaded.series[key], pen=pen, name=SIGNALS[key]["label"])
-            vb.addItem(curve)
-
-            self.curves[key] = {
-                "curve": curve,
-                "viewbox": vb,
-                "unit": unit,
-            }
-
-        self.rebuild_legend()
-        self.auto_range_visible_units()
-
-    def on_export_png(self):
+    def _on_filter_changed(self):
+        self._update_time_label()
         if not self.loaded:
             return
+        self.filter_panel.refresh(self.loaded, self._active_keys(), self.window_spin.value())
 
-        out_path, _ = QFileDialog.getSaveFileName(self, "Save Plot as PNG", "plot.png", "PNG Image (*.png)")
-        if not out_path:
+    def select_all_signals(self):
+        if not self.loaded:
             return
+        for cb in self.checkboxes.values():
+            if cb.isEnabled():
+                cb.blockSignals(True)
+                cb.setChecked(True)
+                cb.blockSignals(False)
+        self._refresh_both_panels()
 
-        try:
-            exporter = ImageExporter(self.plot.plotItem)
-            exporter.parameters()["width"] = 2000
-            exporter.export(out_path)
-        except Exception as e:
-            QMessageBox.critical(self, "Export error", f"Failed to export PNG:\n{e}")
-            return
-
-        QMessageBox.information(self, "Exported", f"Saved:\n{out_path}")
+    def deselect_all_signals(self):
+        for cb in self.checkboxes.values():
+            cb.blockSignals(True)
+            cb.setChecked(False)
+            cb.blockSignals(False)
+        self._refresh_both_panels()
 
 
 # =========================================================
 # Main
 # =========================================================
 
-
 def main():
     app = QApplication([])
     app.setWindowIcon(QIcon(resource_path("assets/icon.ico")))
     win = MainWindow()
-    win.resize(1200, 750)
+    win.resize(1280, 800)
     win.show()
     app.exec()
 
