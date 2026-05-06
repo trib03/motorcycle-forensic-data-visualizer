@@ -699,6 +699,12 @@ class MainWindow(QMainWindow):
         self.stats_table_model = SignalStatsTableModel()
         self.stats_table.setModel(self.stats_table_model)
 
+        raw_tab = QWidget()
+        raw_tab_layout = QVBoxLayout(raw_tab)
+        raw_tab_layout.setContentsMargins(4, 4, 4, 4)
+        raw_tab_layout.addWidget(self.raw_panel)
+
+        # ---- Data tab ----
         raw_tbl_wrap = QWidget()
         rtl = QVBoxLayout(raw_tbl_wrap)
         rtl.setContentsMargins(0, 0, 0, 0)
@@ -718,27 +724,26 @@ class MainWindow(QMainWindow):
         tables_splitter.setStretchFactor(1, 2)
         tables_splitter.setSizes([700, 400])
 
-        raw_tab = QWidget()
-        raw_tab_layout = QVBoxLayout(raw_tab)
-        raw_tab_layout.setContentsMargins(4, 4, 4, 4)
-        raw_tab_layout.addWidget(self.raw_panel, stretch=3)
-        raw_tab_layout.addWidget(tables_splitter, stretch=2)
+        data_tab = QWidget()
+        data_tab_layout = QVBoxLayout(data_tab)
+        data_tab_layout.setContentsMargins(4, 4, 4, 4)
+        data_tab_layout.addWidget(tables_splitter)
 
         # ---- Filter tab ----
         self.filter_panel = PlotPanel()
 
         self.window_slider = QSlider(Qt.Horizontal)
         self.window_slider.setMinimum(1)
-        self.window_slider.setMaximum(500)
+        self.window_slider.setMaximum(50)
         self.window_slider.setValue(1)
-        self.window_slider.setTickInterval(50)
+        self.window_slider.setTickInterval(5)
         self.window_slider.setTickPosition(QSlider.TicksBelow)
 
         self.window_spin = QSpinBox()
         self.window_spin.setMinimum(1)
-        self.window_spin.setMaximum(500)
+        self.window_spin.setMaximum(50)
         self.window_spin.setValue(1)
-        self.window_spin.setFixedWidth(70)
+        self.window_spin.setFixedWidth(100)
 
         self.window_time_lbl = QLabel("")
         self.window_time_lbl.setMinimumWidth(70)
@@ -764,6 +769,7 @@ class MainWindow(QMainWindow):
         self.tabs = QTabWidget()
         self.tabs.addTab(raw_tab, "Raw Signals")
         self.tabs.addTab(filter_tab, "Filtered Signals")
+        self.tabs.addTab(data_tab, "Data")
 
         # ---- Main splitter ----
         splitter = QSplitter()
