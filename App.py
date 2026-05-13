@@ -6,6 +6,8 @@ from typing import Dict, List, Optional
 
 import numpy as np
 import pyqtgraph as pg
+from scipy.integrate import cumulative_trapezoid
+from scipy.signal import butter, filtfilt
 from pyqtgraph.exporters import ImageExporter
 
 from PySide6.QtCore import QAbstractTableModel, QModelIndex, Qt
@@ -20,8 +22,6 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QScrollArea,
-    QSlider,
-    QSpinBox,
     QSplitter,
     QTableView,
     QTabWidget,
@@ -56,6 +56,23 @@ def parse_float(value: str) -> float:
         return np.nan
 
 
+_FILTFILT_CUTOFF_HZ = 10.0
+_FILTFILT_ORDER = 4
+
+
+def _fill_nan(y: np.ndarray) -> np.ndarray:
+    """Replace NaN values with linear interpolation so filtfilt can run."""
+    if not np.isnan(y).any():
+        return y
+    out = y.copy()
+    nans = np.isnan(out)
+    idx = np.where(~nans)[0]
+    if idx.size < 2:
+        return out
+    out[nans] = np.interp(np.where(nans)[0], idx, out[idx])
+    return out
+
+
 def moving_average(y: np.ndarray, window: int) -> np.ndarray:
     """Centered moving average that ignores NaN values within each window."""
     if window <= 1:
@@ -85,6 +102,13 @@ SIGNALS = {
         "preferred_headers": ["raw_ax_mps2"],
         "fallback_headers": ["raw_ax_corr_mps2", "longitudinal_acceleration"],
     },
+    "raw_longitudinal_acceleration_filtfilt": {
+        "label": "Longitudinal Acceleration Filtfilt (m/s²)",
+        "unit": "m/s²",
+        "color": "#ff9999",
+        "preferred_headers": [],
+        "fallback_headers": [],
+    },
     "longitudinal_acceleration": {
         "label": "Filtered Longitudinal Acceleration (m/s²)",
         "unit": "m/s²",
@@ -105,6 +129,13 @@ SIGNALS = {
         "color": "#83DD29",
         "preferred_headers": ["raw_ay_mps2"],
         "fallback_headers": ["raw_ay_corr_mps2", "lateral_acceleration"],
+    },
+    "raw_lateral_acceleration_filtfilt": {
+        "label": "Lateral Acceleration Filtfilt (m/s²)",
+        "unit": "m/s²",
+        "color": "#aaee66",
+        "preferred_headers": [],
+        "fallback_headers": [],
     },
     "lateral_acceleration": {
         "label": "Filtered Lateral Acceleration (m/s²)",
@@ -127,6 +158,13 @@ SIGNALS = {
         "preferred_headers": ["raw_az_mps2"],
         "fallback_headers": ["raw_az_corr_mps2", "vertical_acceleration"],
     },
+    "raw_vertical_acceleration_filtfilt": {
+        "label": "Vertical Acceleration Filtfilt (m/s²)",
+        "unit": "m/s²",
+        "color": "#88eeee",
+        "preferred_headers": [],
+        "fallback_headers": [],
+    },
     "vertical_acceleration": {
         "label": "Filtered Vertical Acceleration (m/s²)",
         "unit": "m/s²",
@@ -148,12 +186,26 @@ SIGNALS = {
         "preferred_headers": ["pitch"],
         "fallback_headers": ["pitch angle", "pitch_angle", "pitch_deg"],
     },
+    "pitch_from_gyro": {
+        "label": "Pitch from Gyro Integrated (deg)",
+        "unit": "deg",
+        "color": "#7744dd",
+        "preferred_headers": [],
+        "fallback_headers": [],
+    },
     "lean_angle": {
         "label": "Lean Angle (deg)",
         "unit": "deg",
         "color": "#08c802",
         "preferred_headers": ["roll"],
         "fallback_headers": ["lean angle", "lean_angle", "roll_deg", "lean"],
+    },
+    "roll_from_gyro": {
+        "label": "Roll from Gyro Integrated (deg)",
+        "unit": "deg",
+        "color": "#33bb88",
+        "preferred_headers": [],
+        "fallback_headers": [],
     },
     "rear_wheel_speed": {
         "label": "Rear Wheel Speed (km/h)",
@@ -253,6 +305,41 @@ def load_csv(path: str) -> LoadedCSV:
         dt = float(np.median(np.diff(x_finite)))
         if dt > 0:
             sample_rate = 1.0 / dt
+
+    if sample_rate is not None and sample_rate > 0:
+        nyq = sample_rate / 2.0
+        if _FILTFILT_CUTOFF_HZ < nyq:
+            b, a = butter(_FILTFILT_ORDER, _FILTFILT_CUTOFF_HZ / nyq, btype="low")
+            x_clean = _fill_nan(x)
+
+            # Filtfilt versions of the three raw acceleration signals
+            for src_key, dst_key in [
+                ("raw_longitudinal_acceleration", "raw_longitudinal_acceleration_filtfilt"),
+                ("raw_lateral_acceleration",      "raw_lateral_acceleration_filtfilt"),
+                ("raw_vertical_acceleration",     "raw_vertical_acceleration_filtfilt"),
+            ]:
+                if src_key in series:
+                    try:
+                        series[dst_key] = filtfilt(b, a, _fill_nan(series[src_key]))
+                    except Exception:
+                        pass
+
+            # Gyro integration with linear drift correction → pitch and roll angles
+            for gyro_header, dst_key in [
+                ("gyro_y_rads", "pitch_from_gyro"),
+                ("gyro_x_rads", "roll_from_gyro"),
+            ]:
+                col = find_column(headers, [gyro_header])
+                if col is not None:
+                    try:
+                        gyro = _fill_nan(parse_float_column(rows, col))
+                        gyro_filt = filtfilt(b, a, gyro)
+                        angle_rad = cumulative_trapezoid(gyro_filt, x_clean, initial=0)
+                        angle_deg = np.rad2deg(angle_rad)
+                        drift = np.linspace(0, angle_deg[-1], len(angle_deg))
+                        series[dst_key] = angle_deg - drift
+                    except Exception:
+                        pass
 
     return LoadedCSV(headers=headers, rows=rows, x=x, series=series, sample_rate=sample_rate)
 
@@ -729,46 +816,9 @@ class MainWindow(QMainWindow):
         data_tab_layout.setContentsMargins(4, 4, 4, 4)
         data_tab_layout.addWidget(tables_splitter)
 
-        # ---- Filter tab ----
-        self.filter_panel = PlotPanel()
-
-        self.window_slider = QSlider(Qt.Horizontal)
-        self.window_slider.setMinimum(1)
-        self.window_slider.setMaximum(50)
-        self.window_slider.setValue(1)
-        self.window_slider.setTickInterval(5)
-        self.window_slider.setTickPosition(QSlider.TicksBelow)
-
-        self.window_spin = QSpinBox()
-        self.window_spin.setMinimum(1)
-        self.window_spin.setMaximum(50)
-        self.window_spin.setValue(1)
-        self.window_spin.setFixedWidth(100)
-
-        self.window_time_lbl = QLabel("")
-        self.window_time_lbl.setMinimumWidth(70)
-
-        self.window_slider.valueChanged.connect(self.window_spin.setValue)
-        self.window_spin.valueChanged.connect(self.window_slider.setValue)
-        self.window_slider.valueChanged.connect(self._on_filter_changed)
-
-        filter_ctrl = QHBoxLayout()
-        filter_ctrl.addWidget(QLabel("Moving average window:"))
-        filter_ctrl.addWidget(self.window_slider, stretch=1)
-        filter_ctrl.addWidget(self.window_spin)
-        filter_ctrl.addWidget(QLabel("samples"))
-        filter_ctrl.addWidget(self.window_time_lbl)
-
-        filter_tab = QWidget()
-        filter_tab_layout = QVBoxLayout(filter_tab)
-        filter_tab_layout.setContentsMargins(4, 4, 4, 4)
-        filter_tab_layout.addLayout(filter_ctrl)
-        filter_tab_layout.addWidget(self.filter_panel, stretch=1)
-
         # ---- Tab widget ----
         self.tabs = QTabWidget()
         self.tabs.addTab(raw_tab, "Raw Signals")
-        self.tabs.addTab(filter_tab, "Filtered Signals")
         self.tabs.addTab(data_tab, "Data")
 
         # ---- Main splitter ----
@@ -785,18 +835,8 @@ class MainWindow(QMainWindow):
     def _active_keys(self) -> List[str]:
         return [k for k, cb in self.checkboxes.items() if cb.isEnabled() and cb.isChecked()]
 
-    def _refresh_both_panels(self):
-        keys = self._active_keys()
-        self.raw_panel.refresh(self.loaded, keys)
-        self.filter_panel.refresh(self.loaded, keys, self.window_spin.value())
-
-    def _update_time_label(self):
-        window = self.window_spin.value()
-        if self.loaded and self.loaded.sample_rate:
-            t = window / self.loaded.sample_rate
-            self.window_time_lbl.setText(f"≈ {t:.2f} s")
-        else:
-            self.window_time_lbl.setText("")
+    def _refresh_panel(self):
+        self.raw_panel.refresh(self.loaded, self._active_keys())
 
     # ---- Slots ----
 
@@ -835,8 +875,6 @@ class MainWindow(QMainWindow):
             any_signal = any_signal or present
 
         self.raw_panel.clear()
-        self.filter_panel.clear()
-        self._update_time_label()
 
         if not any_signal:
             QMessageBox.warning(
@@ -868,13 +906,7 @@ class MainWindow(QMainWindow):
             )
             return
 
-        self._refresh_both_panels()
-
-    def _on_filter_changed(self):
-        self._update_time_label()
-        if not self.loaded:
-            return
-        self.filter_panel.refresh(self.loaded, self._active_keys(), self.window_spin.value())
+        self._refresh_panel()
 
     def select_all_signals(self):
         if not self.loaded:
@@ -884,14 +916,14 @@ class MainWindow(QMainWindow):
                 cb.blockSignals(True)
                 cb.setChecked(True)
                 cb.blockSignals(False)
-        self._refresh_both_panels()
+        self._refresh_panel()
 
     def deselect_all_signals(self):
         for cb in self.checkboxes.values():
             cb.blockSignals(True)
             cb.setChecked(False)
             cb.blockSignals(False)
-        self._refresh_both_panels()
+        self._refresh_panel()
 
 
 # =========================================================
