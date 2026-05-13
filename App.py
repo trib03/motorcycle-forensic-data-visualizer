@@ -60,6 +60,10 @@ _FILTFILT_ACCEL_CUTOFF_HZ = 5.0
 _FILTFILT_GYRO_CUTOFF_HZ = 10.0
 _FILTFILT_ORDER = 4
 
+_ABS_RING_SLOTS = 40
+_FRONT_WHEEL_CIRCUMFERENCE_M = 1.89  # 189 cm
+_REAR_WHEEL_CIRCUMFERENCE_M = 1.98   # 198 cm
+
 
 def _fill_nan(y: np.ndarray) -> np.ndarray:
     """Replace NaN values with linear interpolation so filtfilt can run."""
@@ -243,6 +247,14 @@ def load_csv(path: str) -> LoadedCSV:
             col = find_column(headers, config["fallback_headers"])
         if col is not None:
             series[key] = parse_float_column(rows, col)
+
+    # Convert hall sensor Hz → km/h:  speed = (hz / slots) * circumference * 3.6
+    for key, circ in [
+        ("front_wheel_speed", _FRONT_WHEEL_CIRCUMFERENCE_M),
+        ("rear_wheel_speed",  _REAR_WHEEL_CIRCUMFERENCE_M),
+    ]:
+        if key in series:
+            series[key] = series[key] / _ABS_RING_SLOTS * circ * 3.6
 
     x_finite = x[np.isfinite(x)]
     sample_rate: Optional[float] = None
