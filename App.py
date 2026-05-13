@@ -56,7 +56,8 @@ def parse_float(value: str) -> float:
         return np.nan
 
 
-_FILTFILT_CUTOFF_HZ = 10.0
+_FILTFILT_ACCEL_CUTOFF_HZ = 5.0
+_FILTFILT_GYRO_CUTOFF_HZ = 10.0
 _FILTFILT_ORDER = 4
 
 
@@ -98,112 +99,56 @@ SIGNALS = {
     "raw_longitudinal_acceleration": {
         "label": "Raw Longitudinal Acceleration (m/s²)",
         "unit": "m/s²",
-        "color": "#fd5659",
+        "color": "#FF4E50",
         "preferred_headers": ["raw_ax_mps2"],
         "fallback_headers": ["raw_ax_corr_mps2", "longitudinal_acceleration"],
     },
     "raw_longitudinal_acceleration_filtfilt": {
-        "label": "Longitudinal Acceleration Filtfilt (m/s²)",
-        "unit": "m/s²",
-        "color": "#ff9999",
-        "preferred_headers": [],
-        "fallback_headers": [],
-    },
-    "longitudinal_acceleration": {
         "label": "Filtered Longitudinal Acceleration (m/s²)",
         "unit": "m/s²",
-        "color": "#b80003",
-        "preferred_headers": ["raw_ax_filt_mps2"],
-        "fallback_headers": ["raw_ax_corr_filt_mps2", "filtered_longitudinal_acceleration"],
-    },
-    "lin_longitudinal_acceleration": {
-        "label": "Linear Longitudinal Acceleration (m/s²)",
-        "unit": "m/s²",
-        "color": "#ff9999",
-        "preferred_headers": ["lin_ax_mps2"],
-        "fallback_headers": ["lin_ax_corr_mps2", "linear_longitudinal_acceleration"],
+        "color": "#b30000",
+        "preferred_headers": [],
+        "fallback_headers": [],
     },
     "raw_lateral_acceleration": {
         "label": "Raw Lateral Acceleration (m/s²)",
         "unit": "m/s²",
-        "color": "#83DD29",
+        "color": "#9EFF3D",
         "preferred_headers": ["raw_ay_mps2"],
         "fallback_headers": ["raw_ay_corr_mps2", "lateral_acceleration"],
     },
     "raw_lateral_acceleration_filtfilt": {
-        "label": "Lateral Acceleration Filtfilt (m/s²)",
-        "unit": "m/s²",
-        "color": "#aaee66",
-        "preferred_headers": [],
-        "fallback_headers": [],
-    },
-    "lateral_acceleration": {
         "label": "Filtered Lateral Acceleration (m/s²)",
         "unit": "m/s²",
-        "color": "#4B8F08",
-        "preferred_headers": ["raw_ay_filt_mps2"],
-        "fallback_headers": ["raw_ay_corr_filt_mps2", "filtered_lateral_acceleration"],
-    },
-    "lin_lateral_acceleration": {
-        "label": "Linear Lateral Acceleration (m/s²)",
-        "unit": "m/s²",
-        "color": "#b8ffb8",
-        "preferred_headers": ["lin_ay_mps2"],
-        "fallback_headers": ["lin_ay_corr_mps2", "linear_lateral_acceleration"],
+        "color": "#4c9800",
+        "preferred_headers": [],
+        "fallback_headers": [],
     },
     "raw_vertical_acceleration": {
         "label": "Raw Vertical Acceleration (m/s²)",
         "unit": "m/s²",
-        "color": "#1adae4",
+        "color": "#4bf6ff",
         "preferred_headers": ["raw_az_mps2"],
         "fallback_headers": ["raw_az_corr_mps2", "vertical_acceleration"],
     },
     "raw_vertical_acceleration_filtfilt": {
-        "label": "Vertical Acceleration Filtfilt (m/s²)",
-        "unit": "m/s²",
-        "color": "#88eeee",
-        "preferred_headers": [],
-        "fallback_headers": [],
-    },
-    "vertical_acceleration": {
         "label": "Filtered Vertical Acceleration (m/s²)",
         "unit": "m/s²",
-        "color": "#048187",
-        "preferred_headers": ["raw_az_filt_mps2"],
-        "fallback_headers": ["raw_az_corr_filt_mps2", "filtered_vertical_acceleration"],
-    },
-    "lin_vertical_acceleration": {
-        "label": "Linear Vertical Acceleration (m/s²)",
-        "unit": "m/s²",
-        "color": "#99ccff",
-        "preferred_headers": ["lin_az_mps2"],
-        "fallback_headers": ["lin_az_corr_mps2", "linear_vertical_acceleration"],
-    },
-    "pitch_angle": {
-        "label": "Pitch Angle (deg)",
-        "unit": "deg",
-        "color": "#0f26b7",
-        "preferred_headers": ["pitch"],
-        "fallback_headers": ["pitch angle", "pitch_angle", "pitch_deg"],
-    },
-    "pitch_from_gyro": {
-        "label": "Pitch from Gyro Integrated (deg)",
-        "unit": "deg",
-        "color": "#7744dd",
+        "color": "#01A7A7",
         "preferred_headers": [],
         "fallback_headers": [],
     },
-    "lean_angle": {
-        "label": "Lean Angle (deg)",
+    "pitch_from_gyro": {
+        "label": "Pitch angle (deg)",
         "unit": "deg",
-        "color": "#08c802",
-        "preferred_headers": ["roll"],
-        "fallback_headers": ["lean angle", "lean_angle", "roll_deg", "lean"],
+        "color": "#642bd4",
+        "preferred_headers": [],
+        "fallback_headers": [],
     },
     "roll_from_gyro": {
-        "label": "Roll from Gyro Integrated (deg)",
+        "label": "Roll angle (deg)",
         "unit": "deg",
-        "color": "#33bb88",
+        "color": "#19b078",
         "preferred_headers": [],
         "fallback_headers": [],
     },
@@ -308,11 +253,11 @@ def load_csv(path: str) -> LoadedCSV:
 
     if sample_rate is not None and sample_rate > 0:
         nyq = sample_rate / 2.0
-        if _FILTFILT_CUTOFF_HZ < nyq:
-            b, a = butter(_FILTFILT_ORDER, _FILTFILT_CUTOFF_HZ / nyq, btype="low")
-            x_clean = _fill_nan(x)
+        x_clean = _fill_nan(x)
 
-            # Filtfilt versions of the three raw acceleration signals
+        # Filtfilt versions of the three raw acceleration signals (5 Hz cutoff)
+        if _FILTFILT_ACCEL_CUTOFF_HZ < nyq:
+            b_acc, a_acc = butter(_FILTFILT_ORDER, _FILTFILT_ACCEL_CUTOFF_HZ / nyq, btype="low")
             for src_key, dst_key in [
                 ("raw_longitudinal_acceleration", "raw_longitudinal_acceleration_filtfilt"),
                 ("raw_lateral_acceleration",      "raw_lateral_acceleration_filtfilt"),
@@ -320,11 +265,13 @@ def load_csv(path: str) -> LoadedCSV:
             ]:
                 if src_key in series:
                     try:
-                        series[dst_key] = filtfilt(b, a, _fill_nan(series[src_key]))
+                        series[dst_key] = filtfilt(b_acc, a_acc, _fill_nan(series[src_key]))
                     except Exception:
                         pass
 
-            # Gyro integration with linear drift correction → pitch and roll angles
+        # Gyro integration with linear drift correction → pitch and roll angles (10 Hz cutoff)
+        if _FILTFILT_GYRO_CUTOFF_HZ < nyq:
+            b_gyro, a_gyro = butter(_FILTFILT_ORDER, _FILTFILT_GYRO_CUTOFF_HZ / nyq, btype="low")
             for gyro_header, dst_key in [
                 ("gyro_y_rads", "pitch_from_gyro"),
                 ("gyro_x_rads", "roll_from_gyro"),
@@ -333,7 +280,7 @@ def load_csv(path: str) -> LoadedCSV:
                 if col is not None:
                     try:
                         gyro = _fill_nan(parse_float_column(rows, col))
-                        gyro_filt = filtfilt(b, a, gyro)
+                        gyro_filt = filtfilt(b_gyro, a_gyro, gyro)
                         angle_rad = cumulative_trapezoid(gyro_filt, x_clean, initial=0)
                         angle_deg = np.rad2deg(angle_rad)
                         drift = np.linspace(0, angle_deg[-1], len(angle_deg))
