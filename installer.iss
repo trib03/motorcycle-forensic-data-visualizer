@@ -1,6 +1,6 @@
 [Setup]
 AppName=Motorcycle Forensic Data Visualizer
-AppVersion=1.2.0
+AppVersion=1.3.0
 DefaultDirName={pf}\Motorcycle Forensic Data Visualizer
 DefaultGroupName=Motorcycle Forensic Data Visualizer
 OutputDir=installer_output
