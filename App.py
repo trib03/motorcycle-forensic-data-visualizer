@@ -7,7 +7,7 @@ from typing import Dict, List, Optional
 import numpy as np
 import pyqtgraph as pg
 from scipy.integrate import cumulative_trapezoid
-from scipy.signal import butter, filtfilt
+from scipy.signal import butter, filtfilt, sosfiltfilt
 from pyqtgraph.exporters import ImageExporter
 
 from PySide6.QtCore import QAbstractTableModel, QModelIndex, Qt
@@ -57,8 +57,9 @@ def parse_float(value: str) -> float:
 
 
 _FILTFILT_ACCEL_CUTOFF_HZ = 5.0
-_FILTFILT_GYRO_CUTOFF_HZ = 10.0
+_FILTFILT_GYRO_CUTOFF_HZ = 8.0
 _FILTFILT_ORDER = 4
+_GYRO_DRIFT_HP_HZ = 0.1
 
 _ABS_RING_SLOTS = 40
 _FRONT_WHEEL_CIRCUMFERENCE_M = 1.89  # 189 cm
@@ -156,6 +157,20 @@ SIGNALS = {
         "preferred_headers": [],
         "fallback_headers": [],
     },
+    "pitch_rate_rads": {
+        "label": "Pitch Rate (rad/s)",
+        "unit": "rad/s",
+        "color": "#b47ded",
+        "preferred_headers": [],
+        "fallback_headers": [],
+    },
+    "roll_rate_rads": {
+        "label": "Roll Rate (rad/s)",
+        "unit": "rad/s",
+        "color": "#34d399",
+        "preferred_headers": [],
+        "fallback_headers": [],
+    },
     "rear_wheel_speed": {
         "label": "Rear Wheel Speed (km/h)",
         "unit": "km/h",
@@ -185,6 +200,7 @@ UNIT_AXIS_LABELS = {
     "m/s²": "Acceleration (m/s²)",
     "deg": "Angle (deg)",
     "km/h": "Speed (km/h)",
+    "rad/s": "Angular Rate (rad/s)",
 }
 
 
@@ -284,19 +300,27 @@ def load_csv(path: str) -> LoadedCSV:
         # Gyro integration with linear drift correction → pitch and roll angles (10 Hz cutoff)
         if _FILTFILT_GYRO_CUTOFF_HZ < nyq:
             b_gyro, a_gyro = butter(_FILTFILT_ORDER, _FILTFILT_GYRO_CUTOFF_HZ / nyq, btype="low")
-            for gyro_header, dst_key in [
-                ("gyro_y_rads", "pitch_from_gyro"),
-                ("gyro_x_rads", "roll_from_gyro"),
+            for gyro_header, dst_key, rate_key in [
+                ("gyro_y_rads", "pitch_from_gyro", "pitch_rate_rads"),
+                ("gyro_x_rads", "roll_from_gyro",  "roll_rate_rads"),
             ]:
                 col = find_column(headers, [gyro_header])
                 if col is not None:
                     try:
                         gyro = _fill_nan(parse_float_column(rows, col))
                         gyro_filt = filtfilt(b_gyro, a_gyro, gyro)
+                        series[rate_key] = gyro_filt
                         angle_rad = cumulative_trapezoid(gyro_filt, x_clean, initial=0)
                         angle_deg = np.rad2deg(angle_rad)
-                        drift = np.linspace(0, angle_deg[-1], len(angle_deg))
-                        series[dst_key] = angle_deg - drift
+                        if _GYRO_DRIFT_HP_HZ < nyq:
+                            sos_hp = butter(2, _GYRO_DRIFT_HP_HZ / nyq,
+                                            btype='high', output='sos')
+                            hp = sosfiltfilt(sos_hp, angle_deg)
+                            anchor_n = max(5, min(int(sample_rate), len(hp) // 6))
+                            series[dst_key] = hp - np.mean(hp[:anchor_n])
+                        else:
+                            drift = np.linspace(0, angle_deg[-1], len(angle_deg))
+                            series[dst_key] = angle_deg - drift
                     except Exception:
                         pass
 
@@ -420,7 +444,7 @@ class PlotPanel(QWidget):
         self._loaded: Optional[LoadedCSV] = None
         self.curves: Dict[str, Dict] = {}
         self.unit_order: List[str] = []
-        self._right_grids: Dict[str, List[pg.InfiniteLine]] = {"right1": [], "right2": []}
+        self._right_grids: Dict[str, List[pg.InfiniteLine]] = {"right1": [], "right2": [], "right3": []}
 
         pg.setConfigOptions(antialias=True)
 
@@ -435,29 +459,37 @@ class PlotPanel(QWidget):
 
         self.right_axis_1 = pg.AxisItem("right")
         self.right_axis_2 = pg.AxisItem("right")
+        self.right_axis_3 = pg.AxisItem("right")
         self.plot_item.layout.addItem(self.right_axis_1, 2, 3)
         self.plot_item.layout.addItem(self.right_axis_2, 2, 4)
+        self.plot_item.layout.addItem(self.right_axis_3, 2, 5)
 
         self.right_vb_1 = pg.ViewBox()
         self.right_vb_2 = pg.ViewBox()
+        self.right_vb_3 = pg.ViewBox()
         self.plot_item.scene().addItem(self.right_vb_1)
         self.plot_item.scene().addItem(self.right_vb_2)
+        self.plot_item.scene().addItem(self.right_vb_3)
 
         self.right_axis_1.linkToView(self.right_vb_1)
         self.right_axis_2.linkToView(self.right_vb_2)
+        self.right_axis_3.linkToView(self.right_vb_3)
         self.right_vb_1.setXLink(self.main_vb)
         self.right_vb_2.setXLink(self.main_vb)
+        self.right_vb_3.setXLink(self.main_vb)
 
         self.axis_slots = {
             "left":   {"axis": self.left_axis,    "viewbox": self.main_vb},
             "right1": {"axis": self.right_axis_1,  "viewbox": self.right_vb_1},
             "right2": {"axis": self.right_axis_2,  "viewbox": self.right_vb_2},
+            "right3": {"axis": self.right_axis_3,  "viewbox": self.right_vb_3},
         }
 
         self.main_vb.sigResized.connect(self._sync_views)
         self.main_vb.sigYRangeChanged.connect(lambda *_: self._update_all_grids())
         self.right_vb_1.sigYRangeChanged.connect(lambda *_: self._update_grid("right1"))
         self.right_vb_2.sigYRangeChanged.connect(lambda *_: self._update_grid("right2"))
+        self.right_vb_3.sigYRangeChanged.connect(lambda *_: self._update_grid("right3"))
 
         self._hide_all_axes()
         self._sync_views()
@@ -486,13 +518,16 @@ class PlotPanel(QWidget):
         rect = self.main_vb.sceneBoundingRect()
         self.right_vb_1.setGeometry(rect)
         self.right_vb_2.setGeometry(rect)
+        self.right_vb_3.setGeometry(rect)
         self.right_vb_1.linkedViewChanged(self.main_vb, self.right_vb_1.XAxis)
         self.right_vb_2.linkedViewChanged(self.main_vb, self.right_vb_2.XAxis)
+        self.right_vb_3.linkedViewChanged(self.main_vb, self.right_vb_3.XAxis)
         self._update_all_grids()
 
     def _update_all_grids(self):
         self._update_grid("right1")
         self._update_grid("right2")
+        self._update_grid("right3")
 
     def _clear_grid(self, slot_name: str):
         for line in self._right_grids[slot_name]:
@@ -535,6 +570,7 @@ class PlotPanel(QWidget):
                 axis.hide()
         self._clear_grid("right1")
         self._clear_grid("right2")
+        self._clear_grid("right3")
 
     def _show_active_axes(self):
         self._hide_all_axes()
@@ -549,7 +585,7 @@ class PlotPanel(QWidget):
         self._update_all_grids()
 
     def _slot_for_unit(self, unit: str) -> Optional[str]:
-        slots = ["left", "right1", "right2"]
+        slots = ["left", "right1", "right2", "right3"]
         if unit not in self.unit_order:
             return None
         idx = self.unit_order.index(unit)
@@ -624,7 +660,7 @@ class PlotPanel(QWidget):
             unit = SIGNALS[key]["unit"]
             if unit not in self.unit_order:
                 self.unit_order.append(unit)
-        self.unit_order = self.unit_order[:3]
+        self.unit_order = self.unit_order[:4]
 
         self._show_active_axes()
 
@@ -853,7 +889,7 @@ class MainWindow(QMainWindow):
             if u not in units:
                 units.append(u)
 
-        if len(units) > 3:
+        if len(units) > 4:
             sender = self.sender()
             if isinstance(sender, QCheckBox):
                 sender.blockSignals(True)
@@ -861,7 +897,7 @@ class MainWindow(QMainWindow):
                 sender.blockSignals(False)
             QMessageBox.warning(
                 self, "Too many unit groups",
-                "Only three different unit groups (m/s², deg, km/h) can be shown at once.",
+                "Only four different unit groups (m/s², deg, km/h, rad/s) can be shown at once.",
             )
             return
 
