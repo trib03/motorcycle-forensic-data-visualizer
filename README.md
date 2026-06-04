@@ -1,66 +1,80 @@
-````markdown
 # Developer Update Guide — Motorcycle Forensic Data Visualizer (Python)
 
-This document explains how to update the application after changing `app.py`, rebuild the executable, and create a new Windows installer.
+This document explains how to develop, test, rebuild the executable, and create a
+new Windows installer.
 
 ---
 
 ## Project Structure
 
-Recommended folder structure:
-
 ```text
-csv_viewer_py/
-├─ app.py
-├─ installer.iss
-├─ requirements.txt
+PythonV1/
+├─ App.py                 # thin entry point → motoviz.main_window.main()
+├─ Requirements.txt
+├─ CLAUDE.md              # architecture notes
+├─ packaging/
+│  └─ installer.iss       # Inno Setup script (paths relative to repo root)
 ├─ assets/
-│  └─ app_icon.ico
-├─ build/
-├─ dist/
-└─ installer_output/
-````
+│  └─ icon.ico
+├─ motoviz/               # application package
+│  ├─ __init__.py         # version / app name / publisher
+│  ├─ signals.py          # SIGNALS registry, units, time headers
+│  ├─ csv_loader.py       # CSV parsing + derived-signal computation
+│  ├─ processing.py       # filters, gyro integration, gap analysis
+│  ├─ calibration.py      # Calibration profile (JSON load/save)
+│  ├─ session.py          # forensic session export/import
+│  ├─ settings.py         # QSettings wrapper (prefs, recent files)
+│  ├─ main_window.py      # MainWindow + main() entry point
+│  └─ widgets/
+│     ├─ plot_panel.py    # stacked multi-axis plots
+│     ├─ plot_features.py # crosshair, region selector, gap shader
+│     ├─ tables.py        # raw-data + statistics table models
+│     └─ dialogs.py       # About + Calibration dialogs
+├─ tests/                 # pytest unit tests for the core modules
+├─ build/                 # PyInstaller work dir (generated)
+├─ dist/                  # PyInstaller output (generated)
+└─ installer_output/      # Inno Setup output (generated)
+```
 
----
-
-## When You Change `app.py`
-
-Any time you change:
-
-* UI layout
-* CSV parsing
-* plotting behavior
-* export functionality
-* app icon handling
-
-you must rebuild the application and then rebuild the installer.
+All application code lives in the `motoviz` package. `App.py` stays at the repo
+root because it is the PyInstaller entry script.
 
 ---
 
 ## Step 1 — Activate the Virtual Environment
 
-If you created a virtual environment, activate it first.
+### Windows PowerShell
+
+```powershell
+.\venv\Scripts\Activate.ps1
+```
 
 ### Windows CMD
 
 ```bat
-.venv\Scripts\activate
+venv\Scripts\activate
 ```
 
-### Windows PowerShell
+To (re)install dependencies:
 
 ```powershell
-.venv\Scripts\Activate.ps1
+pip install -r Requirements.txt
 ```
 
 ---
 
-## Step 2 — Test the Application Locally
+## Step 2 — Test the Application
 
-Run the Python app directly before packaging:
+Run the unit tests:
 
-```bash
-python app.py
+```powershell
+python -m pytest
+```
+
+Then run the app directly and smoke-test the UI:
+
+```powershell
+python App.py
 ```
 
 Check that:
@@ -68,95 +82,45 @@ Check that:
 * the window opens
 * CSV loading works
 * signals plot correctly
-* zoom/pan works
+* zoom/pan and the crosshair / region select work
 * PNG export works
 
-If something is broken here, fix it before building.
+Fix anything broken here before building.
 
 ---
 
 ## Step 3 — Clean Old Build Files (Recommended)
 
-To avoid old files being reused, remove previous build output.
-
-### Windows CMD
-
-```bat
-rmdir /s /q build
-rmdir /s /q dist
-```
-
-If `installer_output` should also be cleared:
-
-```bat
-rmdir /s /q installer_output
+```powershell
+Remove-Item -Recurse -Force build, dist, installer_output -ErrorAction SilentlyContinue
 ```
 
 ---
 
 ## Step 4 — Rebuild the Executable with PyInstaller
 
-Run:
-
-```bash
-pyinstaller --noconfirm --windowed --icon=assets/app_icon.ico --name "Motorcycle Forensic Data Visualizer" app.py
+```powershell
+pyinstaller --noconfirm --windowed --icon=assets/icon.ico --name "Motorcycle Forensic Data Visualizer" App.py
 ```
 
-This creates a new packaged application in:
+This creates the packaged application in:
 
 ```text
 dist/Motorcycle Forensic Data Visualizer/
 ```
 
-Important:
-
-* do not send only the `.exe` out of this folder
-* the `.exe` depends on other files inside the same folder
+> The `.exe` depends on the other files in that folder — do not distribute it on its own.
 
 ---
 
-## Step 5 — Rebuild the Installer with Inno Setup
+## Step 5 — Update the Version Number
 
-Open `installer.iss` in **Inno Setup Compiler** and click:
+Bump the version in **both** places so the About dialog and the installer agree:
 
-* **Build → Compile**
-* or press **F9**
+* `motoviz/__init__.py` → `__version__`
+* `packaging/installer.iss` → `AppVersion`
 
-This creates a new installer in:
-
-```text
-installer_output/
-```
-
-Example output:
-
-```text
-installer_output/MotorcycleForensicDataVisualizer-Setup.exe
-```
-
-This is the file you send to the client.
-
----
-
-## Step 6 — Update Version Number Before Releasing
-
-Before creating a new installer, update the version in `installer.iss`.
-
-Find:
-
-```ini
-AppVersion=1.0.0
-```
-
-Change it to:
-
-```ini
-AppVersion=1.0.1
-```
-
-Increase this each time you make a new release.
-
-Examples:
+Versioning guide:
 
 * `1.0.0` → first release
 * `1.0.1` → small fix
@@ -165,115 +129,30 @@ Examples:
 
 ---
 
-## Full Command List
+## Step 6 — Rebuild the Installer with Inno Setup
 
-### Activate venv (CMD)
+Open `packaging/installer.iss` in **Inno Setup Compiler** and press **F9** (Build → Compile).
+The script's paths are relative to `packaging/`, so it reads `..\dist` and `..\assets` and writes to `..\installer_output` at the repo root.
 
-```bat
-.venv\Scripts\activate
+This produces:
+
+```text
+installer_output/MotorcycleForensicDataVisualizer-Setup.exe
 ```
 
-### Run the app locally
-
-```bash
-python app.py
-```
-
-### Delete old build folders
-
-```bat
-rmdir /s /q build
-rmdir /s /q dist
-rmdir /s /q installer_output
-```
-
-### Rebuild executable
-
-```bash
-pyinstaller --noconfirm --windowed --icon=assets/app_icon.ico --name "Motorcycle Forensic Data Visualizer" app.py
-```
-
-### Optional: reinstall dependencies
-
-```bash
-pip install -r requirements.txt
-```
-
-### Optional: install PyInstaller if not installed
-
-```bash
-pip install pyinstaller
-```
+This is the file you distribute.
 
 ---
 
 ## Typical Update Workflow
 
-Use this sequence every time:
-
-### 1. Activate environment
-
-```bat
-.venv\Scripts\activate
-```
-
-### 2. Test current code
-
-```bash
-python app.py
-```
-
-### 3. Clean old build
-
-```bat
-rmdir /s /q build
-rmdir /s /q dist
-rmdir /s /q installer_output
-```
-
-### 4. Rebuild packaged app
-
-```bash
-pyinstaller --noconfirm --windowed --icon=assets/app_icon.ico --name "Motorcycle Forensic Data Visualizer" app.py
-```
-
-### 5. Open `installer.iss` in Inno Setup
-
-### 6. Update `AppVersion`
-
-### 7. Compile installer
-
-### 8. Send the new installer from:
-
-```text
-installer_output/
-```
-
----
-
-## Important Notes
-
-### Do not send only the `.exe` from `dist/`
-
-The executable depends on many other files in the same folder.
-
-Correct:
-
-* create installer with Inno Setup
-* send the installer `.exe`
-
-Wrong:
-
-* send only `dist/.../Motorcycle Forensic Data Visualizer.exe`
-
-### Always test before sending
-
-Install the newly built installer on your own machine first and test:
-
-* open app
-* load CSV
-* plot signals
-* export PNG
+1. Activate the virtual environment
+2. `python -m pytest` and `python App.py` to verify
+3. Clean `build/`, `dist/`, `installer_output/`
+4. Rebuild the executable with PyInstaller
+5. Bump `__version__` (in `motoviz/__init__.py`) and `AppVersion` (in `packaging/installer.iss`)
+6. Compile the installer in Inno Setup (F9)
+7. Install and test on your own machine before sending it out
 
 ---
 
@@ -282,36 +161,7 @@ Install the newly built installer on your own machine first and test:
 Check:
 
 * `dist/Motorcycle Forensic Data Visualizer/` exists
-* `installer.iss` points to the correct folder
-* `assets/app_icon.ico` exists if used in PyInstaller or Inno Setup
+* `packaging/installer.iss` points to the correct `..\dist` folder
+* `assets/icon.ico` exists
 
-Common fix:
-Delete old `build/`, `dist/`, and `installer_output/` folders and rebuild from scratch.
-
----
-
-## Recommended Release Package
-
-Send the client:
-
-* `MotorcycleForensicDataVisualizer-Setup.exe`
-
-Optional extras:
-
-* `UserGuide.pdf`
-* sample CSV file
-
----
-
-## Optional Improvement
-
-To speed up rebuilding later, create a `build.bat` file that runs:
-
-1. clean
-2. PyInstaller
-3. optionally opens Inno Setup
-
-That makes rebuilding faster and repeatable.
-
-```
-```
+Common fix: delete `build/`, `dist/`, and `installer_output/`, then rebuild from scratch.
