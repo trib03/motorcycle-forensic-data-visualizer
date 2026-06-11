@@ -24,7 +24,7 @@ pip install -r Requirements.txt
 Remove-Item -Recurse -Force build, dist, installer_output -ErrorAction SilentlyContinue
 
 # Build Windows executable
-pyinstaller --noconfirm --windowed --icon=assets/icon.ico --name "Motorcycle Forensic Data Visualizer" App.py
+pyinstaller --noconfirm --windowed --icon=assets/icon.ico --add-data "assets/icon.ico;assets" --name "Motorcycle Forensic Data Visualizer" App.py
 ```
 
 After rebuilding the executable, open `packaging/installer.iss` in **Inno Setup Compiler** and press **F9** to produce `installer_output/MotorcycleForensicDataVisualizer-Setup.exe`. Paths inside the script are relative to `packaging/`, so the PyInstaller build still runs from the repo root.

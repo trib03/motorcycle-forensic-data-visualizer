@@ -100,7 +100,7 @@ Remove-Item -Recurse -Force build, dist, installer_output -ErrorAction SilentlyC
 ## Step 4 — Rebuild the Executable with PyInstaller
 
 ```powershell
-pyinstaller --noconfirm --windowed --icon=assets/icon.ico --name "Motorcycle Forensic Data Visualizer" App.py
+pyinstaller --noconfirm --windowed --icon=assets/icon.ico --add-data "assets/icon.ico;assets" --name "Motorcycle Forensic Data Visualizer" App.py
 ```
 
 This creates the packaged application in:
