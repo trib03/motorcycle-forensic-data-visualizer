@@ -8,7 +8,7 @@ from typing import Optional, Tuple
 
 import numpy as np
 from scipy.integrate import cumulative_trapezoid
-from scipy.signal import butter, filtfilt, sosfiltfilt
+from scipy.signal import butter, filtfilt, medfilt, sosfiltfilt
 
 
 # ---------------------------------------------------------------------------
@@ -34,6 +34,28 @@ def fill_nan(y: np.ndarray) -> np.ndarray:
 
 
 # ---------------------------------------------------------------------------
+# Median filter (outlier / spike removal)
+# ---------------------------------------------------------------------------
+
+def median_filter(y: np.ndarray, window: int) -> np.ndarray:
+    """Remove isolated spikes with a sliding median.
+
+    ``window`` is the kernel size in samples; it is coerced to an odd integer
+    (scipy's ``medfilt`` requires odd kernels).  A window below 3 disables the
+    filter and the input is returned as a fresh copy.
+
+    NaNs are interpolated first (like :func:`butterworth`) so a single dropout
+    does not blank out a whole window.  Always returns a new array.
+    """
+    w = int(window)
+    if w < 3:
+        return np.asarray(y, dtype=float).copy()
+    if w % 2 == 0:
+        w += 1
+    return medfilt(fill_nan(y), kernel_size=w)
+
+
+# ---------------------------------------------------------------------------
 # Butterworth filters
 # ---------------------------------------------------------------------------
 
@@ -41,7 +63,7 @@ def butterworth(
     y: np.ndarray,
     sample_rate: float,
     cutoff_hz,
-    order: int = 4,
+    order: int = 2,
     btype: str = "low",
 ) -> np.ndarray:
     """Apply a zero-phase Butterworth filter (filtfilt) to ``y``.
@@ -80,10 +102,10 @@ def butterworth(
 def integrate_gyro_to_angle_deg(
     gyro_rads: np.ndarray,
     sample_rate: float,
-    lowpass_cutoff_hz: float = 8.0,
+    lowpass_cutoff_hz: float = 25.0,
     hp_drift_cutoff_hz: float = 0.1,
     anchor_window_sec: float = 1.0,
-    filter_order: int = 4,
+    filter_order: int = 2,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """Low-pass a gyro stream, then integrate it (uniform 1/sr grid) into an
     angle in degrees, and remove integration drift with a high-pass.

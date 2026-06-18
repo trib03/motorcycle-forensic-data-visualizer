@@ -93,9 +93,11 @@ class CalibrationDialog(QDialog):
         self.front_circ = self._double(0.1, 5.0, 3, " m", self._cal.front_wheel_circumference_m)
         self.rear_circ = self._double(0.1, 5.0, 3, " m", self._cal.rear_wheel_circumference_m)
         self.abs_slots = self._int(1, 1000, self._cal.abs_ring_slots, " slots")
+        self.hall_median = self._int(1, 99, self._cal.hall_median_window, " samples")
         gf.addRow("Front wheel circumference:", self.front_circ)
         gf.addRow("Rear wheel circumference:", self.rear_circ)
         gf.addRow("ABS ring slots:", self.abs_slots)
+        gf.addRow("Wheel-speed median window:", self.hall_median)
 
         # ---- Filtering group ----
         filt = QGroupBox("Default filter cutoffs")
@@ -166,6 +168,7 @@ class CalibrationDialog(QDialog):
         cal.front_wheel_circumference_m = self.front_circ.value()
         cal.rear_wheel_circumference_m = self.rear_circ.value()
         cal.abs_ring_slots = self.abs_slots.value()
+        cal.hall_median_window = self.hall_median.value()
         cal.accel_filter_cutoff_hz = self.accel_cut.value()
         cal.gyro_filter_cutoff_hz = self.gyro_cut.value()
         cal.filtfilt_order = self.order.value()
@@ -177,6 +180,7 @@ class CalibrationDialog(QDialog):
         self.front_circ.setValue(cal.front_wheel_circumference_m)
         self.rear_circ.setValue(cal.rear_wheel_circumference_m)
         self.abs_slots.setValue(cal.abs_ring_slots)
+        self.hall_median.setValue(cal.hall_median_window)
         self.accel_cut.setValue(cal.accel_filter_cutoff_hz)
         self.gyro_cut.setValue(cal.gyro_filter_cutoff_hz)
         self.order.setValue(cal.filtfilt_order)

@@ -22,14 +22,18 @@ class Calibration:
     rear_wheel_circumference_m: float = 1.98
     abs_ring_slots: int = 40
 
+    # Hall-sensor wheel-speed de-spiking: sliding-median window (samples).
+    # Coerced to an odd value; <3 disables the filter.
+    hall_median_window: int = 6
+
     # IMU mounting compensation (small-angle).  Set to 0 for an ideally mounted IMU.
     imu_pitch_offset_deg: float = 0.0
     imu_roll_offset_deg: float = 0.0
 
     # Default filter cutoffs for the precomputed signals (Hz)
-    accel_filter_cutoff_hz: float = 5.0
-    gyro_filter_cutoff_hz: float = 8.0
-    filtfilt_order: int = 4
+    accel_filter_cutoff_hz: float = 4.0
+    gyro_filter_cutoff_hz: float = 25.0
+    filtfilt_order: int = 2
 
     # Gyro drift correction
     gyro_drift_hp_hz: float = 0.1

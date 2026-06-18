@@ -1,6 +1,6 @@
 [Setup]
 AppName=Motorcycle Forensic Data Visualizer
-AppVersion=1.4.0
+AppVersion=1.5.0
 AppPublisher=Thijs Ribbers HAN University
 DefaultDirName={pf}\Motorcycle Forensic Data Visualizer
 DefaultGroupName=Motorcycle Forensic Data Visualizer

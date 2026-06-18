@@ -26,6 +26,7 @@ from .processing import (
     estimate_sample_rate,
     fill_nan,
     integrate_gyro_to_angle_deg,
+    median_filter,
 )
 from .signals import SIGNALS, TIME_HEADERS, is_derived
 
@@ -126,8 +127,14 @@ def _convert_hall_to_kmh(series: Dict[str, np.ndarray], cal: Calibration) -> Non
         ("front_wheel_speed", cal.front_wheel_circumference_m),
         ("rear_wheel_speed", cal.rear_wheel_circumference_m),
     ]:
-        if key in series and cal.abs_ring_slots > 0:
-            series[key] = series[key] / cal.abs_ring_slots * circ * 3.6
+        if key not in series:
+            continue
+        speed = series[key]
+        if cal.abs_ring_slots > 0:
+            speed = speed / cal.abs_ring_slots * circ * 3.6
+        # De-spike the hall-sensor wheel speeds so dropouts/over-counts in the
+        # ABS ring don't show up as isolated outliers.
+        series[key] = median_filter(speed, cal.hall_median_window)
 
 
 def _compute_accel_filtfilt(
